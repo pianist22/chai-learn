@@ -2,7 +2,7 @@
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-const uuidSchema = z.uuid();
+const uuidSchema = z.string().uuid();
 
 /**
  * Validates a route param is a well-formed UUID before it hits the DB.

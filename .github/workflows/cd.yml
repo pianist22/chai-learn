@@ -1,27 +1,5 @@
 name: CD
 
-# Runs only after the CI workflow finishes on `main`, and only deploys
-# if CI actually passed (see the `if:` gate on the job below).
-#
-# Required repo secrets:
-#   EC2_HOST         - server hostname / IP
-#   EC2_USER         - SSH user (needs passwordless sudo for none of this
-#                      anymore — PM2 runs as `yntp`, no systemctl calls)
-#   SSH_PRIVATE_KEY  - private key whose public half is in the user's
-#                      ~/.ssh/authorized_keys on the server
-#
-# Server is expected to be set up by hand first (this is the "deploy
-# without CI/CD" lesson):
-#   - repo cloned at /opt/chai-learn, owned by yntp:devops, tracking `main`
-#   - node (system-wide via NodeSource, /usr/bin/node) and pnpm/pm2
-#     installed globally so any user can reach them
-#   - backend/.env.production  with DATABASE_URL, BETTER_AUTH_SECRET, etc.
-#   - frontend/.env.production with the real VITE_API_URL and PORT
-#   - PM2 processes named `backend` and `frontend`, running as `yntp`,
-#     registered via `pm2 save` + `pm2 startup` (see PM2 bonus chapter)
-#   - EC2_USER has passwordless sudo to run commands as `yntp`
-#     (sudo -u yntp), OR EC2_USER *is* yntp and owns the checkout directly
-
 on:
   workflow_run:
     workflows: ["CI"]
@@ -36,15 +14,13 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    # THE GATE — only deploy if CI actually passed
+    # Gate: Only deploy if CI succeeded
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.5
         env:
-          # Deploy the exact commit CI validated, not whatever `main`
-          # happens to be by the time this job runs.
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -54,12 +30,9 @@ jobs:
           script: |
             set -euo pipefail
 
-            # System-wide Node (NodeSource) lives at /usr/bin, and global
-            # npm packages (pnpm, pm2) land under /usr/lib/node_modules
-            # with bins symlinked into /usr/bin too — so a plain PATH
-            # usually finds them. Kept explicit here so a future switch
-            # back to a per-user install doesn't silently break this.
-            export PATH="/usr/bin:$PATH"
+            # Include pnpm and global node paths for user 'pry'
+            export PATH="/home/pry/.local/share/pnpm/bin:/usr/local/bin:/usr/bin:$PATH"
+
             command -v node >/dev/null || { echo "::error::node not on PATH"; exit 1; }
             command -v pnpm >/dev/null || { echo "::error::pnpm not on PATH"; exit 1; }
             command -v pm2  >/dev/null || { echo "::error::pm2 not on PATH"; exit 1; }
@@ -68,29 +41,26 @@ jobs:
             git fetch --quiet origin main
             git reset --hard "$DEPLOY_SHA"
 
-            # ---- Build & migrate while the old version keeps serving ----
+            # ---- Build & Migrate Backend ----
             pnpm --dir backend install --frozen-lockfile
             NODE_ENV=production pnpm --dir backend run db:migrate:prod
 
+            # ---- Build Frontend ----
             pnpm --dir frontend install --frozen-lockfile
             pnpm --dir frontend run build
 
-            # ---- Swap to the new version ----
-            # PM2 processes run under yntp's PM2 daemon, not the SSH user's.
-            # `pm2 reload` does a zero-downtime rolling restart (vs
-            # `systemctl restart`'s brief drop) — this is the concrete
-            # payoff called out in the PM2 bonus chapter.
-            sudo -u yntp -H pm2 reload backend
-            sudo -u yntp -H pm2 reload frontend
+            # ---- Reload Services via PM2 directly as 'pry' ----
+            pm2 reload backend
+            pm2 reload frontend
 
-            # ---- Verify (the SSR server needs a few seconds to come up) ----
+            # ---- Health Check Verification ----
             for i in $(seq 1 10); do
               if curl -fsS http://localhost:3000/api/health >/dev/null; then
-                echo "health check passed"
+                echo "Health check passed"
                 exit 0
               fi
-              echo "waiting for backend to report healthy... ($i/10)"
+              echo "Waiting for backend to report healthy... ($i/10)"
               sleep 3
             done
-            echo "::error::health check failed after restart"
+            echo "::error::Health check failed after restart"
             exit 1

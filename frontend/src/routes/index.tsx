@@ -25,7 +25,7 @@ function HomePage() {
 				render={<Link to="/courses" />}
 				nativeButton={false}
 			>
-				Browse Courses
+				Browse Courses All Courses
 				<ArrowRight className="ml-2 size-4" />
 			</Button>
 			<p className="absolute inset-x-0 bottom-4 text-xs text-muted-foreground">
